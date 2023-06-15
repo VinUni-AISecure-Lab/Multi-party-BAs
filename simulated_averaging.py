@@ -17,6 +17,7 @@ from torch.optim import lr_scheduler
 from utils import *
 from fl_trainer import *
 from models.vgg import get_vgg_model
+import wandb
 
 READ_CKPT=True
 
@@ -49,6 +50,8 @@ if __name__ == "__main__":
                         help='how many batches to wait before logging training status')
     parser.add_argument('--fraction', type=float or int, default=10,
                         help='how many fraction of poisoned data inserted')
+    parser.add_argument('--scale_factor', type=float or int, default=1.0,
+                        help='scaling factor for the attackers')
     parser.add_argument('--local_train_period', type=int, default=1,
                         help='number of local training epochs')
     parser.add_argument('--num_nets', type=int, default=3383,
@@ -81,16 +84,32 @@ if __name__ == "__main__":
                         help='specify source of data poisoning: |ardis|fashion|(for EMNIST) || |southwest|southwest+wow|southwest-da|greencar-neo|howto|(for CIFAR-10)')
     parser.add_argument('--rand_seed', type=int, default=7,
                         help='random seed utilize in the experiment for reproducibility.')
+    parser.add_argument('--attack_freq', type=int, default=10,
+                        help='attack freq for fixed-frequency BAs.')
     parser.add_argument('--model_replacement', type=bool_string, default=False,
                         help='to scale or not to scale')
     parser.add_argument('--project_frequency', type=int, default=10,
                         help='project once every how many epochs')
     parser.add_argument('--adv_lr', type=float, default=0.02,
                         help='learning rate for adv in PGD setting')
+    parser.add_argument('--pdr', type=float, default=0.02,
+                        help='poisoned data rate for each malicious clients')
+    parser.add_argument('--ba_strategy', type=str, default="edge-case",
+                        help='stategy for BAs')
     parser.add_argument('--prox_attack', type=bool_string, default=False,
                         help='use prox attack')
+    parser.add_argument('--single_attack', type=bool_string, default=False,
+                        help='used as a baseline')
+    parser.add_argument('--same_target', type=bool_string, default=False,
+                        help='whether two parties have the same target label or not')
+    parser.add_argument('--same_round', type=bool_string, default=True,
+                        help='whether two parties appearing at the same rounds or not')
     parser.add_argument('--attack_case', type=str, default="edge-case",
                         help='attack case indicates wheather the honest nodes see the attackers poisoned data points: edge-case|normal-case|almost-edge-case')
+    parser.add_argument('--wandb_group', type=str, default="LIRA-FL-Experiments",
+                        help='group name for wandb logging')
+    parser.add_argument('--instance', type=str, default="LIRA-FL-Experiments",
+                        help='instance inside each group for wandb logging')
     parser.add_argument('--stddev', type=float, default=0.158,
                         help='choose std_dev for weak-dp defense')
     args = parser.parse_args()
@@ -107,7 +126,17 @@ if __name__ == "__main__":
     else:
         device = 'cuda' if use_cuda else 'cpu'
      """
-    
+    wandb_ins_name = args.instance if args.instance else f"{args.defense_method}_baseline_{args.baseline}_{args.dataset}___{args.model}"
+    instance_name = "Multi-party-BAS-investigation"
+    group_name = args.wandb_group
+
+    wandb_ins = wandb.init(project="Multi-party BAs in FL", 
+                        #    entity="vinuni-ai-secure-lab",
+                            entity="aiotlab",
+                            name=wandb_ins_name,
+                            group=group_name,
+                            settings=wandb.Settings(start_method="fork"))
+
     logger.info("Running Attack of the tails with args: {}".format(args))
     logger.info(device)
     logger.info('==> Building model..')
@@ -133,7 +162,7 @@ if __name__ == "__main__":
     adversarial_local_training_period = 5
 
     # load poisoned dataset:
-    poisoned_train_loader, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, clean_train_loader = load_poisoned_dataset(args=args)
+    poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader = load_poisoned_datasets(args=args)
     # READ_CKPT = False
     if READ_CKPT:
         if args.model == "lenet":
@@ -158,7 +187,7 @@ if __name__ == "__main__":
     logger.info("Test the model performance on the entire task before FL process ... ")
 
     test(net_avg, device, vanilla_test_loader, test_batch_size=args.test_batch_size, criterion=criterion, mode="raw-task", dataset=args.dataset)
-    test(net_avg, device, targetted_task_test_loader, test_batch_size=args.test_batch_size, criterion=criterion, mode="targetted-task", dataset=args.dataset, poison_type=args.poison_type)
+    # test(net_avg, device, targetted_task_test_loader, test_batch_size=args.test_batch_size, criterion=criterion, mode="targetted-task", dataset=args.dataset, poison_type=args.poison_type)
 
     # let's remain a copy of the global model for measuring the norm distance:
     vanilla_model = copy.deepcopy(net_avg)
@@ -177,13 +206,20 @@ if __name__ == "__main__":
             "local_training_period":args.local_train_period, #5 #1
             "adversarial_local_training_period":args.adversarial_local_training_period,
             "args_lr":args.lr,
+            "single_attack":args.single_attack,
             "args_gamma":args.gamma,
-            "attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-1)%10 == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
+            "scale_factor":args.scale_factor,
+            "same_target":args.same_target,
+            "same_round":args.same_round,
+            "attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-1)% args.attack_freq == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
             #"attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-1)%100 == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
             "num_dps_poisoned_dataset":num_dps_poisoned_dataset,
             "poisoned_emnist_train_loader":poisoned_train_loader,
+            "num_dps_poisoned_dataset_2":num_dps_poisoned_dataset_2,
+            "poisoned_emnist_train_loader_2":poisoned_train_loader_2,
             "clean_train_loader":clean_train_loader,
             "vanilla_emnist_test_loader":vanilla_test_loader,
+            "ba_strategy":args.ba_strategy,
             "targetted_task_test_loader":targetted_task_test_loader,
             "batch_size":args.batch_size,
             "test_batch_size":args.test_batch_size,
@@ -203,7 +239,7 @@ if __name__ == "__main__":
         }
 
         frequency_fl_trainer = FrequencyFederatedLearningTrainer(arguments=arguments)
-        frequency_fl_trainer.run()
+        frequency_fl_trainer.run(wandb_ins = wandb_ins)
     elif args.fl_mode == "fixed-pool":
         arguments = {
             #"poisoned_emnist_dataset":poisoned_emnist_dataset,

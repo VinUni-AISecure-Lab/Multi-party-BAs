@@ -74,7 +74,7 @@ def create_fashion_poisoned_dataset(fashion_mnist_dataset, emnist_dataset, fract
                                                         poisoned_emnist_dataset.targets.size()))
     return poisoned_emnist_dataset
 
-def create_ardis_poisoned_dataset(emnist_dataset, fraction=1, num_gdps_sampled=100):
+def create_ardis_poisoned_dataset(emnist_dataset, fraction=1, num_gdps_sampled=100, target_label=7):
     # we are going to label 7s from the ARDIS dataset as 1
 
     # load the data from csv's
@@ -86,7 +86,7 @@ def create_ardis_poisoned_dataset(emnist_dataset, fraction=1, num_gdps_sampled=1
     ardis_images = ardis_images.reshape(ardis_images.shape[0], 28, 28).astype('float32')
 
     # labels are one-hot encoded
-    indices_seven = np.where(ardis_labels[:,7] == 1)[0]
+    indices_seven = np.where(ardis_labels[:,target_label] == 1)[0]
     images_seven = ardis_images[indices_seven,:]
     images_seven = torch.tensor(images_seven).type(torch.uint8)
 

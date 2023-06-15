@@ -53,7 +53,7 @@ The main script is `./simulated_averaging.py`, to launch the jobs, we provide a 
 
 
 #### Sample command
-Blackbox attack on Southwest Airline exmaple over CIFAR-19 dataset where there is no defense on the data center. The attacker participate in the fixed-frequency manner.
+Blackbox attack on Southwest Airline exmaple over CIFAR-10 dataset where there is no defense on the data center. The attacker participate in the fixed-frequency manner.
 ```
 python simulated_averaging.py \
 --lr 0.02 \

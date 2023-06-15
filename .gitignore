@@ -1,0 +1,4 @@
+wandb/*
+track_trigger/*
+data/*
+__pycache__/*

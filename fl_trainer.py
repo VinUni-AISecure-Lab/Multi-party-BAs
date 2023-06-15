@@ -2,6 +2,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 from utils import *
 from defense import *
@@ -193,6 +194,48 @@ def train(model, device, train_loader, optimizer, epoch, log_interval, criterion
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
 
+def train_aba(model, device, train_loader, optimizer, epoch, log_interval, criterion, pgd_attack=False, eps=5e-4, model_original=None,
+        proj="l_2", project_frequency=1, adv_optimizer=None, prox_attack=False, wg_hat=None, pattern_idxs=[], target_transform=None, 
+        dataset="emnist"):
+    """
+        train function for both honest nodes and adversary.
+        NOTE: this trains only for one epoch
+    """
+    model.train()
+    poison_data_count = 0
+    total_loss = 0.
+    correct = 0
+    dataset_size = 0
+
+    # get learning rate
+    for param_group in optimizer.param_groups:
+        eta = param_group['lr']
+
+    for batch_idx, batch in enumerate(train_loader):
+        data, target, poison_num, _, _ = get_poison_batch(batch, dataset=dataset, device=device, 
+                                                        target_transform=target_transform, 
+                                                        pattern_idxs=pattern_idxs)
+        optimizer.zero_grad()
+        dataset_size += len(data)
+        poison_data_count += poison_num
+
+        if pgd_attack:
+            adv_optimizer.zero_grad()
+        output = model(data)
+        #loss = F.nll_loss(output, target)
+        # loss = criterion(output, target)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+        pred = output.data.max(1)[1]  # get the index of the max log-probability
+        correct += pred.eq(target.data.view_as(pred)).cpu().sum().item()
+    
+    acc = 100.0 * (float(correct) / float(dataset_size))
+    total_l = total_loss / dataset_size
+
+    logger.info('Train Epoch: {} [poisoned samples: ({:d}/{:d})]\tLoss: {:.6f}\tTraining Acc: {:.2f}'.format(
+        epoch, poison_data_count, dataset_size, total_l, acc))
 
 def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task", dataset="cifar10", poison_type="fashion"):
     class_correct = list(0. for i in range(10))
@@ -274,7 +317,6 @@ def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task"
         final_acc = 100. * correct / len(test_loader.dataset)
 
     elif mode == "targetted-task":
-
         if dataset in ("mnist", "emnist"):
             for i in range(10):
                 logger.info('Accuracy of %5s : %.2f %%' % (
@@ -293,13 +335,118 @@ def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task"
             final_acc = 100 * class_correct[target_class] / class_total[target_class]
     return final_acc, task_acc
 
+def test_aba(model, device, test_loader, test_batch_size, criterion, mode="raw-task", dataset="cifar10", poison_type="fashion", 
+            target_class=7, target_transform=None, pattern_idxs=[]):
+    class_correct = list(0. for i in range(10))
+    class_total = list(0. for i in range(10))
+    
+    if dataset in ("mnist", "emnist"):
+        # target_class = 7
+        if mode == "raw-task":
+            classes = [str(i) for i in range(10)]
+        elif mode == "targetted-task":
+            if poison_type == 'ardis':
+                classes = [str(i) for i in range(10)]
+            else: 
+                classes = ["T-shirt/top", 
+                            "Trouser",
+                            "Pullover",
+                            "Dress",
+                            "Coat",
+                            "Sandal",
+                            "Shirt",
+                            "Sneaker",
+                            "Bag",
+                            "Ankle boot"]
+    elif dataset == "cifar10":
+        classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+        # target_class = 2 for greencar, 9 for southwest
+        # if poison_type in ("howto", "greencar-neo"):
+        #     target_class = 2
+        # else:
+        #     target_class = 9
+
+    model.eval()
+    test_loss = 0
+    correct = 0
+    backdoor_correct = 0
+    backdoor_tot = 0
+    final_acc = 0
+    test_transform_loss = 0.0
+    correct_transform = 0
+    task_acc = None
+
+    with torch.no_grad():
+        for data, target in test_loader:
+            bs = len(data)
+            data, target = data.to(device), target.to(device)
+            data.requires_grad_(False)
+            target.requires_grad_(False)
+            output = model(data)
+
+            _, predicted = torch.max(output, 1)
+            c = (predicted == target).squeeze()
+            test_loss += criterion(output, target).item() * bs  # sum up batch loss
+            pred = output.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+            for image_index in range(len(target)):
+                label = target[image_index]
+                class_correct[label] += c[image_index].item()
+                class_total[label] += 1
+            # check backdoor accuracy
+            batch = (copy.deepcopy(data), copy.deepcopy(target))
+            atkdata, atktarget, poison_num, _, _ = get_poison_batch(batch, dataset, device, evaluation=True, 
+                                                                    target_transform=target_transform, 
+                                                                    pattern_idxs=pattern_idxs)
+            atktarget = target_transform(target)
+            atkdata.requires_grad_(False)
+            atktarget.requires_grad_(False)
+
+            atkoutput = model(atkdata)
+            test_transform_loss += criterion(atkoutput, atktarget).item() * bs  # sum up batch loss
+            atkpred = atkoutput.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            correct_transform += atkpred.eq(
+                target_transform(target).view_as(atkpred)).sum().item()
+
+    test_loss /= len(test_loader.dataset)
+    test_transform_loss /= len(test_loader.dataset)
+
+    correct /= len(test_loader.dataset)
+    correct_transform /= len(test_loader.dataset)
+
+    if 10 % 10 == 0:
+        batch_img = torch.cat(
+        [data[:4].clone().cpu(), atkdata[:4].clone().cpu()], 0)
+        batch_img = F.upsample(batch_img, scale_factor=(4, 4))
+        grid = torchvision.utils.make_grid(batch_img, normalize=True)
+        torchvision.utils.save_image(grid, f"track_trigger/pattern_idxs_{pattern_idxs[0]}__checkpoint_trigger_image_epoch.png")
+    # print(f"class_total: {class_total}")
+    if dataset in ("mnist", "emnist"):
+        for i in range(10):
+            logger.info('Accuracy of %5s : %.2f %%' % (
+                classes[i], 100 * class_correct[i] / class_total[i]))
+        if poison_type == 'ardis':
+            # ensure 7 is being classified as 1
+            logger.info('Backdoor Accuracy of %.2f : %.2f %%' % (
+                    target_class, 100 * correct_transform))
+            final_acc = 100 * correct_transform
+        else:
+            # trouser acc
+            final_acc = 100 * class_correct[1] / class_total[1]
+    
+    elif dataset == "cifar10":
+        logger.info('#### Targetted Accuracy of %5s : %.2f %%' % (classes[target_class], 100 * class_correct[target_class] / class_total[target_class]))
+        final_acc = 100 * class_correct[target_class] / class_total[target_class]
+    return correct*100, correct_transform*100
+
+
 class FederatedLearningTrainer:
     def __init__(self, *args, **kwargs):
         self.hyper_params = None
 
     def run(self, client_model, *args, **kwargs):
         raise NotImplementedError()
-
 
 class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
     def __init__(self, arguments=None, *args, **kwargs):
@@ -316,6 +463,7 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         self.args_gamma = arguments['args_gamma']
         self.attacking_fl_rounds = arguments['attacking_fl_rounds']
         self.poisoned_emnist_train_loader = arguments['poisoned_emnist_train_loader']
+        self.poisoned_emnist_train_loader_2 = arguments['poisoned_emnist_train_loader_2']
         self.clean_train_loader = arguments['clean_train_loader']
         self.vanilla_emnist_test_loader = arguments['vanilla_emnist_test_loader']
         self.targetted_task_test_loader = arguments['targetted_task_test_loader']
@@ -323,7 +471,11 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         self.test_batch_size = arguments['test_batch_size']
         self.log_interval = arguments['log_interval']
         self.device = arguments['device']
+        self.single_attack = arguments['single_attack']
+        self.scale_factor = arguments['scale_factor']
+        self.same_round = arguments['same_round']
         self.num_dps_poisoned_dataset = arguments['num_dps_poisoned_dataset']
+        self.num_dps_poisoned_dataset_2 = arguments['num_dps_poisoned_dataset_2']
         self.defense_technique = arguments["defense_technique"]
         self.norm_bound = arguments["norm_bound"]
         self.attack_method = arguments["attack_method"]
@@ -338,8 +490,11 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         self.prox_attack = arguments['prox_attack']
         self.attack_case = arguments['attack_case']
         self.stddev = arguments['stddev']
+        self.same_target = arguments['same_target']
+        self.ba_strategy = arguments['ba_strategy']
+        self.attacking_fl_rounds_2 = []
 
-        logger.info("Posion type! {}".format(self.poison_type))
+        logger.info("Posion type! {}".format(self.ba_strategy))
 
         if self.poison_type == 'ardis':
             self.ardis_dataset = datasets.get_ardis_dataset()
@@ -376,32 +531,62 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
             NotImplementedError("Unsupported defense method !")
 
 
-    def run(self):
+    def run(self, wandb_ins):
         main_task_acc = []
         raw_task_acc = []
         backdoor_task_acc = []
         fl_iter_list = []
         adv_norm_diff_list = []
         wg_norm_list = []
+
+        # Target transformation functions for two parties
+        tgt_trans = get_target_transform(1)
+        tgt_trans_2 = get_target_transform(4)
+        tgt_classes = [1, 4]
+        if self.same_target:
+            tgt_trans_2 = tgt_trans
+            tgt_classes = [1, 1]
+        ptn_idxs_ls = [[0], [1]]
+        ma, ba = 0.0, 0.0
+        ma_2, ba_2 = 0.0, 0.0
+        
+        if not self.same_round:
+            self.attacking_fl_rounds_2 = [i+1 for i in self.attacking_fl_rounds]
+        elif not self.single_attack:
+            self.attacking_fl_rounds_2 = [i for i in self.attacking_fl_rounds]
+        else:
+            self.attacking_fl_rounds_2 = []
         # let's conduct multi-round training
         for flr in range(1, self.fl_round+1):
-            logger.info("##### attack fl rounds: {}".format(self.attacking_fl_rounds))
+            # logger.info("##### attack fl rounds: {}".format(self.attacking_fl_rounds))
             g_user_indices = []
 
             if self.defense_technique == "norm-clipping-adaptive":
                 # experimental
                 norm_diff_collector = []
 
-            if flr in self.attacking_fl_rounds:
+            if flr in self.attacking_fl_rounds or flr in self.attacking_fl_rounds_2:
+                local_MA, local_BA = 0.0, 0.0
+                local_MA_2, local_BA_2 = 0.0, 0.0
                 # randomly select participating clients
                 # in this current version, we sample `part_nets_per_round-1` per FL round since we assume attacker will always participates
-                selected_node_indices = np.random.choice(self.num_nets, size=self.part_nets_per_round-1, replace=False)
+                selected_node_indices = np.random.choice(self.num_nets, size=self.part_nets_per_round, replace=False) # self.part_nets_per_round-2: assume there are two malicious clients belonging to two parties
+                # total_selected = self.part_nets_per_round-1 if self.single_attack else self.part_nets_per_round-2
+                # selected_node_indices = np.random.choice(self.num_nets, size=total_selected, replace=False) # self.part_nets_per_round-2: assume there are two malicious clients belonging to two parties
                 num_data_points = [len(self.net_dataidx_map[i]) for i in selected_node_indices]
-                total_num_dps_per_round = sum(num_data_points) + self.num_dps_poisoned_dataset
+                
+                if flr in self.attacking_fl_rounds:
+                    num_data_points[0] = self.num_dps_poisoned_dataset
+                if flr in self.attacking_fl_rounds_2:
+                    num_data_points[1] = self.num_dps_poisoned_dataset_2               
+                # total_num_dps_per_round = sum(num_data_points) + self.num_dps_poisoned_dataset + self.num_dps_poisoned_dataset_2
+                
+                total_num_dps_per_round = sum(num_data_points)
+                logger.info("FL round: {}, total num data points: {}, num dps poisoned: {} and {}".format(flr, num_data_points, self.num_dps_poisoned_dataset, self.num_dps_poisoned_dataset_2))
 
-                logger.info("FL round: {}, total num data points: {}, num dps poisoned: {}".format(flr, num_data_points, self.num_dps_poisoned_dataset))
-
-                net_freq = [self.num_dps_poisoned_dataset/ total_num_dps_per_round] + [num_data_points[i]/total_num_dps_per_round for i in range(self.part_nets_per_round-1)]
+                # net_freq = [self.num_dps_poisoned_dataset/ total_num_dps_per_round, self.num_dps_poisoned_dataset_2/ total_num_dps_per_round] + [num_data_points[i]/total_num_dps_per_round for i in range(self.part_nets_per_round-2)]
+                net_freq = [num_data_points[i]/total_num_dps_per_round for i in range(self.part_nets_per_round)]
+                
                 logger.info("Net freq: {}, FL round: {} with adversary".format(net_freq, flr)) 
                 #pdb.set_trace()
 
@@ -419,11 +604,15 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                 # start the FL process
                 for net_idx, net in enumerate(net_list):
                     #net  = net_list[net_idx]                
-                    if net_idx == 0:
-                        global_user_idx = -1 # we assign "-1" as the indices of the attacker in global user indices
+                    if net_idx == 0 and flr in self.attacking_fl_rounds:
+                        global_user_idx = -1 # we assign "-1" as the indices of the attacker in global user indices of party #1
+                        pass
+                    elif net_idx == 1 and flr in self.attacking_fl_rounds_2:
+                        global_user_idx = -2 # we assign "-2" as the indices of the attacker in global user indices of party #2
                         pass
                     else:
-                        global_user_idx = selected_node_indices[net_idx-1]
+                        # global_user_idx = selected_node_indices[net_idx-2] if not self.single_attack else selected_node_indices[net_idx-1]
+                        global_user_idx = selected_node_indices[net_idx]
                         dataidxs = self.net_dataidx_map[global_user_idx]
                         if self.attack_case == "edge-case":
                             train_dl_local, _ = get_dataloader(self.dataset, './data', self.batch_size, 
@@ -439,7 +628,7 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                             NotImplementedError("Unsupported attack case ...")
 
                     g_user_indices.append(global_user_idx)
-                    if net_idx == 0:
+                    if (net_idx == 0 and flr in self.attacking_fl_rounds) or (net_idx == 1 and flr in self.attacking_fl_rounds_2):
                         logger.info("@@@@@@@@ Working on client: {}, which is Attacker".format(net_idx))
                     else:
                         logger.info("@@@@@@@@ Working on client: {}, which is Global user: {}".format(net_idx, global_user_idx))
@@ -451,45 +640,70 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                     for param_group in optimizer.param_groups:
                         logger.info("Effective lr in FL round: {} is {}".format(flr, param_group['lr']))
                     
-                    if net_idx == 0:
+                    if (net_idx == 0 and flr in self.attacking_fl_rounds) or (net_idx == 1 and flr in self.attacking_fl_rounds_2):
+                        # TODO: Party 1 --> add code to customize here
+                        # TODO: Party 2 --> add code to customize here
+                        tgt_tf = tgt_trans if net_idx == 0 else tgt_trans_2
+                        target_class = tgt_classes[net_idx]
+                        tgt_label = 1 if net_idx == 0 else tgt_trans_2
+                        ptn_idxs = ptn_idxs_ls[net_idx]
+                        local_train_dl = self.poisoned_emnist_train_loader if net_idx == 0 else self.poisoned_emnist_train_loader_2
                         if self.prox_attack:
                             # estimate w_hat
                             for inner_epoch in range(1, self.local_training_period+1):
                                 estimate_wg(wg_clone, self.device, self.clean_train_loader, prox_optimizer, inner_epoch, log_interval=self.log_interval, criterion=self.criterion)
                             wg_hat = wg_clone
-
-                        for e in range(1, self.adversarial_local_training_period+1):
-                           # we always assume net index 0 is adversary
-                            if self.defense_technique in ('krum', 'multi-krum'):
-                                train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
-                                        pgd_attack=self.pgd_attack, eps=self.eps*self.args_gamma**(flr-1), model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
-                                        prox_attack=self.prox_attack, wg_hat=wg_hat)
-                            else:
-                                train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
-                                        pgd_attack=self.pgd_attack, eps=self.eps, model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
-                                        prox_attack=self.prox_attack, wg_hat=wg_hat)
-
-                               
-                               
-                        test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
-                        test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
+                            
+                        # TODO: Add a function for testing with pattern-based BA
+                        if self.ba_strategy == "edge-case":
+                            for e in range(1, self.adversarial_local_training_period+1):
+                            # we always assume net index 0 is adversary
+                                if self.defense_technique in ('krum', 'multi-krum'):
+                                    train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
+                                            pgd_attack=self.pgd_attack, eps=self.eps*self.args_gamma**(flr-1), model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
+                                            prox_attack=self.prox_attack, wg_hat=wg_hat)
+                                else:
+                                    train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
+                                            pgd_attack=self.pgd_attack, eps=self.eps, model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
+                                            prox_attack=self.prox_attack, wg_hat=wg_hat)
+                            # TODO: Add a function for testing with pattern-based BA       
+                            test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
+                            test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
+                        elif self.ba_strategy == "dba":
+                            for e in range(1, self.adversarial_local_training_period+1):
+                                train_aba(net, self.device, local_train_dl , optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
+                                            pgd_attack=self.pgd_attack, eps=self.eps*self.args_gamma**(flr-1), model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
+                                            prox_attack=self.prox_attack, wg_hat=wg_hat, pattern_idxs=ptn_idxs, dataset=self.dataset, target_transform=tgt_tf)
 
                         # if model_replacement scale models
-                        if self.model_replacement:
+                        if self.model_replacement or self.scale_factor > 1.0:
                             v = torch.nn.utils.parameters_to_vector(net.parameters())
                             logger.info("Attacker before scaling : Norm = {}".format(torch.norm(v)))
                             # adv_norm_diff = calc_norm_diff(gs_model=net, vanilla_model=self.net_avg, epoch=e, fl_round=flr, mode="bad")
                             # logger.info("||w_bad - w_avg|| before scaling = {}".format(adv_norm_diff))
-
-                            for idx, param in enumerate(net.parameters()):
-                                param.data = (param.data - model_original[idx])*(total_num_dps_per_round/self.num_dps_poisoned_dataset) + model_original[idx]
+                            if self.model_replacement:
+                                for idx, param in enumerate(net.parameters()):
+                                    param.data = (param.data - model_original[idx])*(total_num_dps_per_round/self.num_dps_poisoned_dataset) + model_original[idx]
+                            else:
+                                for idx, param in enumerate(net.parameters()):
+                                    param.data = (param.data - model_original[idx])*(self.scale_factor) + model_original[idx]
                             v = torch.nn.utils.parameters_to_vector(net.parameters())
                             logger.info("Attacker after scaling : Norm = {}".format(torch.norm(v)))
-
-                        # at here we can check the distance between w_bad and w_g i.e. `\|w_bad - w_g\|_2`
-                        # we can print the norm diff out for debugging
-                        adv_norm_diff = calc_norm_diff(gs_model=net, vanilla_model=self.net_avg, epoch=e, fl_round=flr, mode="bad")
-                        adv_norm_diff_list.append(adv_norm_diff)
+                        # TODO: Add a function for testing with pattern-based BA       
+                        test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
+                        temp_ma, temp_ba = test_aba(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
+                                    target_class=target_class, target_transform=tgt_tf, pattern_idxs=ptn_idxs)
+                        logger.info(f"For client idx {net_idx}, local MA is: {temp_ma} and local BA is: {temp_ba}")
+                        if net_idx == 0:
+                            local_MA, local_BA = temp_ma, temp_ba
+                        elif net_idx == 1:
+                            local_MA_2, local_BA_2 = temp_ma, temp_ba
+                        else:
+                            logger.info("Bug NULL!")
+                        # # at here we can check the distance between w_bad and w_g i.e. `\|w_bad - w_g\|_2`
+                        # # we can print the norm diff out for debugging
+                        # adv_norm_diff = calc_norm_diff(gs_model=net, vanilla_model=self.net_avg, epoch=e, fl_round=flr, mode="bad")
+                        # adv_norm_diff_list.append(adv_norm_diff)
 
                         if self.defense_technique == "norm-clipping-adaptive":
                             # experimental
@@ -613,12 +827,34 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
             logger.info("Measuring the accuracy of the averaged global model, FL round: {} ...".format(flr))
 
             overall_acc, raw_acc = test(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
-            backdoor_acc, _ = test(self.net_avg, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
- 
+            # backdoor_acc, _ = test(self.net_avg, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
+            if flr in self.attacking_fl_rounds:
+                ma, ba = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
+                                     target_class=tgt_classes[0], target_transform=tgt_trans, pattern_idxs=ptn_idxs_ls[0])
+
+            if flr in self.attacking_fl_rounds_2:
+                ma_2, ba_2 = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
+                                     target_class=tgt_classes[1], target_transform=tgt_trans_2, pattern_idxs=ptn_idxs_ls[1])
+            
             fl_iter_list.append(flr)
             main_task_acc.append(overall_acc)
             raw_task_acc.append(raw_acc)
-            backdoor_task_acc.append(backdoor_acc)
+            # backdoor_task_acc.append(backdoor_acc)
+
+            wandb_logging_items = {
+                'fl_iter': flr,
+                'MTA_Party_1': ma,
+                'BTA_Party_1': ba, 
+                'MTA_Party_2': ma_2,
+                'BTA_Party_2': ba_2, 
+                'local_MA_Party_1': local_MA,
+                'local_BA_Party_1': local_BA,
+                'local_MA_Party_2': local_MA_2,
+                'local_BA_Party_2': local_BA_2,
+            }
+            if wandb_ins:
+                print(f"start logging to wandb")
+                wandb_ins.log({"General Information": wandb_logging_items})
 
         df = pd.DataFrame({'fl_iter': fl_iter_list, 
                             'main_task_acc': main_task_acc, 

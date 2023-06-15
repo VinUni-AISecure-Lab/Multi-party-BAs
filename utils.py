@@ -26,6 +26,123 @@ logging.basicConfig()
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+pattern_dict = {
+    'cifar10': {
+        '0_poison_pattern': [[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5]],
+        '1_poison_pattern': [[0, 9], [0, 10], [0, 11], [0, 12], [0, 13], [0, 14]],
+        '2_poison_pattern': [[4, 0], [4, 1], [4, 2], [4, 3], [4, 4], [4, 5]],
+        '3_poison_pattern': [[4, 9], [4, 10], [4, 11], [4, 12], [4, 13], [4, 14]],
+    },
+    'mnist': {
+        '0_poison_pattern': [[0, 0], [0, 1], [0, 2], [0, 3], [0, 6], [0, 7], [0, 8], [0, 9], [3, 0], [3, 1], [3, 2], [3, 3], [3, 6], [3, 7], [3, 8], [3, 9]],
+        '1_poison_pattern': [[0, 24], [0, 25], [0, 26], [0, 27], [0, 20], [0, 21], [0, 22], [0, 23], [3, 24], [3, 25], [3, 26], [3, 27], [3, 20], [3, 21], [3, 22], [3, 23]],
+        '2_poison_pattern': [[3, 0], [3, 1], [3, 2], [3, 3]],
+        '3_poison_pattern': [[3, 6], [3, 7], [3, 8], [3, 9]],
+    },
+    'emnist': {
+        # '0_poison_pattern': [[0, 0], [0, 1], [0, 2], [0, 3]],
+        # '1_poison_pattern': [[0, 6], [0, 7], [0, 8], [0, 9]],
+        '0_poison_pattern': [[0, 0], [0, 1], [0, 2], [0, 3], [0, 6], [0, 7], [0, 8], [0, 9], [3, 0], [3, 1], [3, 2], [3, 3], [3, 6], [3, 7], [3, 8], [3, 9]],
+        '1_poison_pattern': [[0, 24], [0, 25], [0, 26], [0, 27], [0, 20], [0, 21], [0, 22], [0, 23], [3, 24], [3, 25], [3, 26], [3, 27], [3, 20], [3, 21], [3, 22], [3, 23]],
+        '2_poison_pattern': [[3, 0], [3, 1], [3, 2], [3, 3]],
+        '3_poison_pattern': [[3, 6], [3, 7], [3, 8], [3, 9]],
+    },
+    'timagenet': {
+        '0_poison_pattern': [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2], [0, 3], [1, 3], [0, 4], [1, 4], [0, 5], [1, 5], [0, 6], [1, 6], [0, 7], [1, 7], [0, 8], [1, 8], [0, 9], [1, 9]],
+        '1_poison_pattern': [[0, 12], [1, 12], [0, 13], [1, 13], [0, 14], [1, 14], [0, 15], [1, 15], [0, 16], [1, 16], [0, 17], [1, 17], [0, 18], [1, 18], [0, 19], [1, 19], [0, 20], [1, 20], [0, 21], [1, 21]],
+        '2_poison_pattern': [[4, 0], [5, 0], [4, 1], [5, 1], [4, 2], [5, 2], [4, 3], [5, 3], [4, 4], [5, 4], [4, 5], [5, 5], [4, 6], [5, 6], [4, 7], [5, 7], [4, 8], [5, 8], [4, 9], [5, 9]],
+        '3_poison_pattern': [[4, 12], [5, 12], [4, 13], [5, 13], [4, 14], [5, 14], [4, 15], [5, 15], [4, 16], [5, 16], [4, 17], [5, 17], [4, 18], [5, 18], [4, 19], [5, 19], [4, 20], [5, 20], [4, 21], [5, 21]],
+    }
+}
+def add_pixel_pattern(image, dataset, device, pattern_idxs=[]):
+    pattern_s = pattern_dict[dataset]
+    poison_patterns = []
+    for i in pattern_idxs:
+        poison_patterns = poison_patterns + pattern_s[str(i) + '_poison_pattern']
+    if dataset in ['cifar10', 'timagenet']:
+        for i in range(0,len(poison_patterns)):
+            pos = poison_patterns[i]
+            image[0][pos[0]][pos[1]] = 1
+            image[1][pos[0]][pos[1]] = 1
+            image[2][pos[0]][pos[1]] = 1
+    elif dataset in ['mnist', "emnist"]:
+        for i in range(0, len(poison_patterns)):
+            pos = poison_patterns[i]
+            image[0][pos[0]][pos[1]] = 1
+    return image.to(device)
+
+def get_poison_batch(bptt, dataset, device, target_label=1, poisoning_per_batch=20, evaluation=False, target_transform=None, pattern_idxs=[]):
+        images, targets = bptt
+        poison_count= 0
+        new_images=images
+        new_targets=targets
+        original_imgs, bd_imgs = [], []
+        for index in range(0, len(images)):
+            if evaluation: # poison all data when testing
+                # if adversarial_index == -1:
+                original_imgs.append(images[index]) 
+                new_targets[index] = target_transform(targets[index])
+                new_images[index] = add_pixel_pattern(images[index], dataset, device, pattern_idxs)
+                poison_count+=1
+                # if adversarial_index == -1:
+                bd_imgs.append(new_images[index])
+
+
+            else: # poison part of data when training
+                if index < poisoning_per_batch:
+                    original_imgs.append(images[index])
+                    new_targets[index] = target_transform(targets[index])
+                    new_images[index] = add_pixel_pattern(images[index], dataset, device, pattern_idxs)
+                    poison_count += 1
+                    bd_imgs.append(new_images[index])
+                else:
+                    new_images[index] = images[index]
+                    new_targets[index]= targets[index]
+        new_images = new_images.to(device)
+        new_targets = new_targets.to(device).long()
+        if evaluation:
+            new_images.requires_grad_(False)
+            new_targets.requires_grad_(False)
+        return new_images,new_targets,poison_count, original_imgs, bd_imgs
+
+def get_dba_poison(inputs, dataset, device="cpu", pattern_idxs=[]):
+    pattern_s = pattern_dict[dataset]
+    poison_patterns = []
+    new_images = inputs
+    original_imgs, bd_imgs = [], []
+    for index in range(0, len(original_imgs)):
+        ori_image = original_imgs[index]
+        image = copy.deepcopy(ori_image)
+        for i in range(0,4):
+            poison_patterns = poison_patterns + pattern_s[str(i) + '_poison_pattern']
+        if dataset in ['cifar10', 'timagenet']:
+            for i in pattern_idxs:
+                pos = poison_patterns[i]
+                image[0][pos[0]][pos[1]] = 1
+                image[1][pos[0]][pos[1]] = 1
+                image[2][pos[0]][pos[1]] = 1
+        elif dataset == 'mnist':
+            for i in pattern_idxs:
+                pos = poison_patterns[i]
+                image[0][pos[0]][pos[1]] = 1
+        new_images[index] = image
+        new_images = new_images.to(device)
+    return new_images
+
+def get_target_transform(target_label):
+    """
+    Get target transform function
+    """
+    target_transform = lambda x: torch.ones_like(x) * target_label
+    # elif args['mode'] == 'all2all':
+    #     target_transform = lambda x: all2all_target_transform(x, args['num_classes'])
+    # else:
+    #     raise Exception(f'Invalid mode {args.mode}')
+    return target_transform
+
+def get_attack_config(expr_scenario=0):
+    tgt_trans = get_target_transform(1)
+    tgt_trans_2 = get_target_transform(4)
 
 class Net(nn.Module):
     def __init__(self, num_classes):
@@ -285,7 +402,6 @@ def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None):
     return train_dl, test_dl
 
 
-
 def get_dataloader_normal_case(dataset, datadir, train_bs, test_bs, 
                                 dataidxs=None, 
                                 user_id=0, 
@@ -355,10 +471,10 @@ def get_dataloader_normal_case(dataset, datadir, train_bs, test_bs,
     return train_dl, test_dl
 
 
-
 def load_poisoned_dataset(args):
     use_cuda = not args.no_cuda and torch.cuda.is_available()
-    kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
+    kwargs = {'num_workers': 56, 'pin_memory': True} if use_cuda else {}
+    # print(f"kwargs: {kwargs}")
     if args.dataset in ("mnist", "emnist"):
         if args.fraction < 1:
             fraction=args.fraction  #0.1 #10
@@ -490,9 +606,9 @@ def load_poisoned_dataset(args):
 
             #poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
             #trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=2)
-            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True)
-            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
-            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True)
+            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
 
             testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
 
@@ -502,8 +618,8 @@ def load_poisoned_dataset(args):
 
             # vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, num_workers=2)
             # targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, num_workers=2)
-            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False)
-            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False)
+            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
 
             num_dps_poisoned_dataset = poisoned_trainset.data.shape[0]
 
@@ -612,9 +728,9 @@ def load_poisoned_dataset(args):
             logger.info("{}".format(poisoned_trainset.target.shape))
 
 
-            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True)
-            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True)
-            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
 
             testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
 
@@ -622,8 +738,8 @@ def load_poisoned_dataset(args):
             poisoned_testset.data = saved_southwest_dataset_test
             poisoned_testset.targets = sampled_targets_array_test
 
-            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False)
-            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False)
+            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
 
             num_dps_poisoned_dataset = poisoned_trainset.data.shape[0]            
 
@@ -684,9 +800,9 @@ def load_poisoned_dataset(args):
             logger.info("Poisoned Train Target Shape:{}".format(poisoned_trainset.targets.shape))
 
 
-            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True)
-            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True)
-            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
 
             testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
 
@@ -694,8 +810,8 @@ def load_poisoned_dataset(args):
             poisoned_testset.data = saved_greencar_dataset_test
             poisoned_testset.targets = sampled_targets_array_test
 
-            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False)
-            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False)
+            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
             num_dps_poisoned_dataset = poisoned_trainset.data.shape[0]
 
         elif args.poison_type == "greencar-neo":
@@ -766,9 +882,9 @@ def load_poisoned_dataset(args):
             logger.info("Poisoned Train Target Shape:{}".format(poisoned_trainset.targets.shape))
 
 
-            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True)
-            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True)
-            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
 
             testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
 
@@ -776,12 +892,164 @@ def load_poisoned_dataset(args):
             poisoned_testset.data = saved_new_green_cars_test
             poisoned_testset.targets = sampled_targets_array_test
 
-            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False)
-            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False)
+            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
             num_dps_poisoned_dataset = poisoned_trainset.data.shape[0]
 
     return poisoned_train_loader, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, clean_train_loader
 
+def load_poisoned_datasets(args):
+    use_cuda = not args.no_cuda and torch.cuda.is_available()
+    kwargs = {'num_workers': 56, 'pin_memory': True} if use_cuda else {}
+    default_pdr = 0.5 if args.dataset in ("mnist", "emnist") else 0.33
+    pdr = args.pdr if args.pdr is not None else default_pdr
+
+    if args.dataset in ("mnist", "emnist"):
+        fraction=0.2 #0.0334 #0.01 #0.1 #0.0168 #10
+        emnist_train_dataset = datasets.EMNIST('./data', split="digits", train=True, download=True,
+                       transform=transforms.Compose([
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.1307,), (0.3081,))
+                       ]))
+        # load the data from csv's [Ardis data to created poisoned samples]
+        ardis_images=np.loadtxt('./data/ARDIS/ARDIS_train_2828.csv', dtype='float')
+        ardis_labels=np.loadtxt('./data/ARDIS/ARDIS_train_labels.csv', dtype='float')
+        #### reshape to be [samples][width][height]
+        ardis_images = ardis_images.reshape(ardis_images.shape[0], 28, 28).astype('float32')
+        total_ardis_samples = ardis_images.shape[0]
+
+        # labels are one-hot encoded
+        indices_seven = np.where(ardis_labels[:,7] == 1)[0]
+        images_seven = ardis_images[indices_seven,:]
+        images_seven = torch.tensor(images_seven).type(torch.uint8)
+        print(f"total_ardis_samples of 7 is: {images_seven.shape[0]}")
+        
+        if fraction < 1:
+            images_seven_cut = images_seven[:(int)(fraction*images_seven.size()[0])]
+            print('size of images_seven_cut: ', images_seven_cut.size())
+            poisoned_labels_cut = torch.ones(images_seven_cut.size()[0]).long()
+
+        else:
+            images_seven_DA = copy.deepcopy(images_seven)
+            cand_angles = [180/fraction * i for i in range(1, fraction+1)]
+            print("Candidate angles for DA: {}".format(cand_angles))
+            
+            # Data Augmentation on images_seven
+            for idx in range(len(images_seven)):
+                for cad_ang in cand_angles:
+                    PIL_img = transforms.ToPILImage()(images_seven[idx]).convert("L")
+                    PIL_img_rotate = transforms.functional.rotate(PIL_img, cad_ang, fill=(0,))
+
+                    #plt.imshow(PIL_img_rotate, cmap='gray')
+                    #plt.pause(0.0001)
+                    img_rotate = torch.from_numpy(np.array(PIL_img_rotate))
+                    images_seven_DA = torch.cat((images_seven_DA, img_rotate.reshape(1,img_rotate.size()[0], img_rotate.size()[0])), 0)
+
+                    print(images_seven_DA.size())
+
+            poisoned_labels_DA = torch.ones(images_seven_DA.size()[0]).long()
+        total_ardis_samples = images_seven_cut.size()[0]
+        print(f"total_ardis_samples of 7 after cut is: {total_ardis_samples}")
+        poisoned_emnist_dataset = copy.deepcopy(emnist_train_dataset)
+        poisoned_emnist_dataset_2 = copy.deepcopy(emnist_train_dataset)
+        ################## (Temporial, may be changed later) ###################
+        num_gdps_sampled = 100 # Keep original as the edge-case backdoor attack paper
+        num_sampled_data_points = 500
+        
+        total_emnist_training_samples = poisoned_emnist_dataset.data.shape[0]
+        print(f"Total poisoned_emnist_dataset.data.shape[0]: {total_emnist_training_samples}")
+        samped_emnist_data_indices = np.random.choice(total_emnist_training_samples, num_sampled_data_points, replace=False)
+        # print(f"np.setdiff1d(np.arange(total_emnist_training_samples), samped_emnist_data_indices): {np.setdiff1d(np.arange(total_emnist_training_samples), samped_emnist_data_indices).shape}")
+        samped_emnist_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(total_emnist_training_samples), samped_emnist_data_indices), num_sampled_data_points, replace=False)
+
+        poisoned_emnist_dataset.data = poisoned_emnist_dataset.data[samped_emnist_data_indices, :, :]
+        poisoned_emnist_dataset.targets = poisoned_emnist_dataset.targets[samped_emnist_data_indices]
+
+        poisoned_emnist_dataset_2.data = poisoned_emnist_dataset_2.data[samped_emnist_data_indices_2, :, :]
+        poisoned_emnist_dataset_2.targets = poisoned_emnist_dataset_2.targets[samped_emnist_data_indices_2]
+
+        ########################################################################
+        print(f"poisoned_emnist_dataset: {images_seven_cut.size()}")
+        # clean_trainset = copy.deepcopy(poisoned_emnist_dataset)
+        # clean_trainset_2 = copy.deepcopy(poisoned_emnist_dataset_2)
+
+        # NEW: This step tries to calculate number of poisoned samples needed. 
+        # print(f"pdr: {pdr}")
+        total_poisoned_samples = int(pdr*num_sampled_data_points/(1.0-pdr))
+        print(f"total_poisoned_samples: {total_poisoned_samples}")
+        samped_poisoned_data_indices = np.random.choice(total_ardis_samples, total_poisoned_samples, replace=False)
+        samped_poisoned_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(total_ardis_samples), samped_poisoned_data_indices), total_poisoned_samples, replace=False)
+       
+        if fraction < 1 and pdr > 0:
+            poisoned_emnist_dataset.data = torch.cat((poisoned_emnist_dataset.data, images_seven_cut[samped_poisoned_data_indices]))
+            poisoned_emnist_dataset.targets = torch.cat((poisoned_emnist_dataset.targets, poisoned_labels_cut[samped_poisoned_data_indices]))
+            
+            poisoned_emnist_dataset_2.data = torch.cat((poisoned_emnist_dataset_2.data, images_seven_cut[samped_poisoned_data_indices_2]))
+            poisoned_emnist_dataset_2.targets = torch.cat((poisoned_emnist_dataset_2.targets, poisoned_labels_cut[samped_poisoned_data_indices_2]))
+        elif pdr > 0:
+            poisoned_emnist_dataset.data = torch.cat((poisoned_emnist_dataset.data, images_seven_DA))
+            poisoned_emnist_dataset.targets = torch.cat((poisoned_emnist_dataset.targets, poisoned_labels_DA))        
+            # with open("poisoned_dataset_fraction_{}".format(fraction), "rb") as saved_data_file:
+            #     poisoned_dataset = torch.load(saved_data_file)
+        num_dps_poisoned_dataset = poisoned_emnist_dataset.data.shape[0]
+        num_dps_poisoned_dataset_2 = poisoned_emnist_dataset_2.data.shape[0]
+
+        # prepare EMNIST dataset (clean dataset for evaluation)
+        emnist_train_dataset = datasets.EMNIST('./data', split="digits", train=True, download=True,
+                        transform=transforms.Compose([
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.1307,), (0.3081,))
+                        ]))
+        emnist_test_dataset = datasets.EMNIST('./data', split="digits", train=False, transform=transforms.Compose([
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.1307,), (0.3081,))
+                        ]))
+        fashion_mnist_test_dataset = datasets.FashionMNIST('./data', train=False, download=True, transform=transforms.Compose([
+                               transforms.ToTensor(),
+                               transforms.Normalize((0.1307,), (0.3081,))
+                           ]))
+
+        poisoned_train_loader = torch.utils.data.DataLoader(poisoned_emnist_dataset,
+            batch_size=args.batch_size, shuffle=True, **kwargs)
+        poisoned_train_loader_2 = torch.utils.data.DataLoader(poisoned_emnist_dataset_2,
+            batch_size=args.batch_size, shuffle=True, **kwargs)        
+        vanilla_test_loader = torch.utils.data.DataLoader(emnist_test_dataset,
+            batch_size=args.test_batch_size, shuffle=False, **kwargs)
+        targetted_task_test_loader = torch.utils.data.DataLoader(fashion_mnist_test_dataset,
+            batch_size=args.test_batch_size, shuffle=False, **kwargs)
+        clean_train_loader = torch.utils.data.DataLoader(emnist_train_dataset,
+                batch_size=args.batch_size, shuffle=True, **kwargs)
+        
+        if args.poison_type == 'ardis':
+            # load ardis test set
+            with open("./data/ARDIS/ardis_test_dataset.pt", "rb") as saved_data_file:
+                ardis_test_dataset = torch.load(saved_data_file)
+
+            targetted_task_test_loader = torch.utils.data.DataLoader(ardis_test_dataset,
+                batch_size=args.test_batch_size, shuffle=False, **kwargs)
+                    # fig = plt.figure(figsize = (10, 5))
+        # # clean_trainset = copy.deepcopy(poisoned_dataset)
+        # print("clean data target's shape: ", clean_trainset.targets.shape)
+        # labels_clean_set = clean_trainset.targets
+        # unique, counts = np.unique(labels_clean_set, return_counts=True)
+        # cnt_clean_label = dict(zip(unique, counts))
+        # cnt_clean_label["edge-case"] = total_poisoned_samples
+        # # print(cnt_clean_label)
+        # # df = pd.DataFrame(cnt_clean_label)
+        # # print(df)
+        # labs = list(cnt_clean_label.keys())
+        # labs = list(map(str, labs))
+        # cnts = list(cnt_clean_label.values())
+        # print("labs: ", labs)    
+        # # creating the bar plot
+        # barlist = plt.bar(labs, cnts, color ='maroon')
+        # barlist[-1].set_color('b')
+            
+        # plt.xlabel("Label distribution")
+        # plt.ylabel("No. of sample per label")
+        # plt.title("Poison client data's distribution")
+        # plt.savefig(f"emnist_distribution_label_dpr_{dpr}.png")
+    return poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader
 
 def seed_experiment(seed=0):
     # seed = 1234
