@@ -1,3 +1,4 @@
+## This repo is for studying effect of multi-party backdoor attacks
 ## Attack of the Tails: Yes, You Really Can Backdoor Federated Learning
 
 ### Overview
