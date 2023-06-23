@@ -32,6 +32,7 @@ pattern_dict = {
         '1_poison_pattern': [[0, 9], [0, 10], [0, 11], [0, 12], [0, 13], [0, 14]],
         '2_poison_pattern': [[4, 0], [4, 1], [4, 2], [4, 3], [4, 4], [4, 5]],
         '3_poison_pattern': [[4, 9], [4, 10], [4, 11], [4, 12], [4, 13], [4, 14]],
+        '4_poison_pattern': [[2, 7], [1, 3], [3, 10], [0, 8], [4, 2], [5, 12], [6, 5], [9, 0], [7, 11], [12, 4], [8, 6], [10, 1], [11, 9], [13, 13]],
     },
     'mnist': {
         '0_poison_pattern': [[0, 0], [0, 1], [0, 2], [0, 3], [0, 6], [0, 7], [0, 8], [0, 9], [3, 0], [3, 1], [3, 2], [3, 3], [3, 6], [3, 7], [3, 8], [3, 9]],
@@ -129,15 +130,18 @@ def get_dba_poison(inputs, dataset, device="cpu", pattern_idxs=[]):
         new_images = new_images.to(device)
     return new_images
 
-def get_target_transform(target_label):
+def get_target_transform(target_label, mode="all2one", num_classes=10):
     """
     Get target transform function
     """
-    target_transform = lambda x: torch.ones_like(x) * target_label
-    # elif args['mode'] == 'all2all':
-    #     target_transform = lambda x: all2all_target_transform(x, args['num_classes'])
-    # else:
-    #     raise Exception(f'Invalid mode {args.mode}')
+    if mode == "all2one":
+        target_transform = lambda x: torch.ones_like(x) * target_label
+    elif mode == 'all2all':
+        print(f"mode: {mode}") 
+        target_transform = lambda x: (x + 1) % num_classes
+    else:
+        raise Exception(f'Invalid mode {mode}')
+    
     return target_transform
 
 def get_attack_config(expr_scenario=0):
@@ -898,11 +902,15 @@ def load_poisoned_dataset(args):
 
     return poisoned_train_loader, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, clean_train_loader
 
-def load_poisoned_datasets(args):
+def load_poisoned_datasets(args, scenario_config):
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     kwargs = {'num_workers': 56, 'pin_memory': True} if use_cuda else {}
-    default_pdr = 0.5 if args.dataset in ("mnist", "emnist") else 0.33
-    pdr = args.pdr if args.pdr is not None else default_pdr
+    # default_pdr = 0.5 if args.dataset in ("mnist", "emnist") else 0.33
+    # pdr = args.pdr if args.pdr is not None else default_pdr
+
+    pdrs = scenario_config['pdr']
+    tgt_labels = scenario_config['target_class']
+    pdr, pdr_2 = pdrs[0], pdrs[1]
 
     if args.dataset in ("mnist", "emnist"):
         fraction=0.2 #0.0334 #0.01 #0.1 #0.0168 #10
@@ -976,9 +984,11 @@ def load_poisoned_datasets(args):
         # NEW: This step tries to calculate number of poisoned samples needed. 
         # print(f"pdr: {pdr}")
         total_poisoned_samples = int(pdr*num_sampled_data_points/(1.0-pdr))
-        print(f"total_poisoned_samples: {total_poisoned_samples}")
+        total_poisoned_samples_2 = int(pdr_2*num_sampled_data_points/(1.0-pdr_2))
+        print(f"Total poisoned samples are: {total_poisoned_samples}, {total_poisoned_samples_2}")
+        
         samped_poisoned_data_indices = np.random.choice(total_ardis_samples, total_poisoned_samples, replace=False)
-        samped_poisoned_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(total_ardis_samples), samped_poisoned_data_indices), total_poisoned_samples, replace=False)
+        samped_poisoned_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(total_ardis_samples), samped_poisoned_data_indices), total_poisoned_samples_2, replace=False)
        
         if fraction < 1 and pdr > 0:
             poisoned_emnist_dataset.data = torch.cat((poisoned_emnist_dataset.data, images_seven_cut[samped_poisoned_data_indices]))
@@ -1017,6 +1027,7 @@ def load_poisoned_datasets(args):
             batch_size=args.test_batch_size, shuffle=False, **kwargs)
         targetted_task_test_loader = torch.utils.data.DataLoader(fashion_mnist_test_dataset,
             batch_size=args.test_batch_size, shuffle=False, **kwargs)
+        targetted_task_test_loader_2 = None
         clean_train_loader = torch.utils.data.DataLoader(emnist_train_dataset,
                 batch_size=args.batch_size, shuffle=True, **kwargs)
         
@@ -1049,7 +1060,129 @@ def load_poisoned_datasets(args):
         # plt.ylabel("No. of sample per label")
         # plt.title("Poison client data's distribution")
         # plt.savefig(f"emnist_distribution_label_dpr_{dpr}.png")
-    return poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader
+    elif args.dataset == "cifar10":
+        if args.poison_type == "southwest":
+            transform_train = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+            ])
+
+            transform_test = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),])
+
+            trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+
+            poisoned_trainset = copy.deepcopy(trainset)
+            poisoned_trainset_2 = copy.deepcopy(trainset)
+
+            if args.attack_case == "edge-case":
+                with open('./saved_datasets/southwest_images_new_train.pkl', 'rb') as train_f:
+                    saved_southwest_dataset_train = pickle.load(train_f)
+
+                with open('./saved_datasets/southwest_images_new_test.pkl', 'rb') as test_f:
+                    saved_southwest_dataset_test = pickle.load(test_f)
+            elif args.attack_case == "normal-case" or args.attack_case == "almost-edge-case":
+                with open('./saved_datasets/southwest_images_adv_p_percent_edge_case.pkl', 'rb') as train_f:
+                    saved_southwest_dataset_train = pickle.load(train_f)
+
+                with open('./saved_datasets/southwest_images_p_percent_edge_case_test.pkl', 'rb') as test_f:
+                    saved_southwest_dataset_test = pickle.load(test_f)
+            else:
+                raise NotImplementedError("Not Matched Attack Case ...")  
+            #
+            logger.info("OOD (Southwest Airline) train-data shape we collected: {}".format(saved_southwest_dataset_train.shape))
+            #sampled_targets_array_train = 2 * np.ones((saved_southwest_dataset_train.shape[0],), dtype =int) # southwest airplane -> label as bird
+            sampled_targets_array_train = tgt_labels[0] * np.ones((saved_southwest_dataset_train.shape[0],), dtype =int) # southwest airplane -> label as truck
+            sampled_targets_array_train_2 = tgt_labels[1] * np.ones((saved_southwest_dataset_train.shape[0],), dtype =int) # southwest airplane -> label as X
+            logger.info("OOD (Southwest Airline) test-data shape we collected: {}".format(saved_southwest_dataset_test.shape))
+            #sampled_targets_array_test = 2 * np.ones((saved_southwest_dataset_test.shape[0],), dtype =int) # southwest airplane -> label as bird
+            sampled_targets_array_test = tgt_labels[0] * np.ones((saved_southwest_dataset_test.shape[0],), dtype =int) # southwest airplane -> label as truck
+            sampled_targets_array_test_2 = tgt_labels[1] * np.ones((saved_southwest_dataset_test.shape[0],), dtype =int) # southwest airplane -> label as X
+            total_poisoned_data_samples = saved_southwest_dataset_train.shape[0]
+
+            # calculate number of poisoned samples each party has
+            num_sampled_data_points = 500 # TODO: need to change it properly
+            num_sampled_poisoned_data_points = int(pdr*num_sampled_data_points/(1.0-pdr))
+            num_sampled_poisoned_data_points_2 = int(pdr_2*num_sampled_data_points/(1.0-pdr_2))
+            print(f"Total poisoned samples are: {num_sampled_poisoned_data_points}, {num_sampled_poisoned_data_points_2}")
+            
+            saved_southwest_dataset_train_cp = copy.deepcopy(saved_southwest_dataset_train)
+            # downsample the poisoned dataset #################
+            if args.attack_case == "edge-case" and (pdr > 0 or pdr_2 > 0):
+                # num_sampled_poisoned_data_points = 100 # N
+                samped_poisoned_data_indices = np.random.choice(saved_southwest_dataset_train.shape[0],
+                                                                num_sampled_poisoned_data_points,
+                                                                replace=False)
+                samped_poisoned_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(total_poisoned_data_samples), samped_poisoned_data_indices), 
+                                                                  num_sampled_poisoned_data_points_2, 
+                                                                  replace=False)
+                
+                saved_southwest_dataset_train = saved_southwest_dataset_train_cp[samped_poisoned_data_indices, :, :, :]
+                sampled_targets_array_train = np.array(sampled_targets_array_train)[samped_poisoned_data_indices]
+
+                saved_southwest_dataset_train_2 = saved_southwest_dataset_train_cp[samped_poisoned_data_indices_2, :, :, :]
+                sampled_targets_array_train_2 = np.array(sampled_targets_array_train_2)[samped_poisoned_data_indices_2]
+
+                logger.info("!!!!!!!!!!!Num poisoned data points in the mixed dataset: {},{}".format(num_sampled_poisoned_data_points, num_sampled_poisoned_data_points_2))
+            elif args.attack_case == "normal-case" or args.attack_case == "almost-edge-case":
+                num_sampled_poisoned_data_points = 100 # N
+                samped_poisoned_data_indices = np.random.choice(784,
+                                                                num_sampled_poisoned_data_points,
+                                                                replace=False)
+            ######################################################
+            # num_sampled_data_points = 1000 # M
+            samped_data_indices = np.random.choice(poisoned_trainset.data.shape[0], num_sampled_data_points, replace=False)
+            samped_data_indices_2 = np.random.choice(np.setdiff1d(np.arange(poisoned_trainset.data.shape[0]), samped_data_indices), 
+                                                     num_sampled_data_points, replace=False)
+            poisoned_trainset.data = poisoned_trainset.data[samped_data_indices, :, :, :]
+            poisoned_trainset.targets = np.array(poisoned_trainset.targets)[samped_data_indices]
+            
+            poisoned_trainset_2.data = poisoned_trainset_2.data[samped_data_indices_2, :, :, :]
+            poisoned_trainset_2.targets = np.array(poisoned_trainset_2.targets)[samped_data_indices_2]
+            
+            logger.info("!!!!!!!!!!!Num clean data points in the mixed datasets: {}, {}".format(num_sampled_data_points, num_sampled_data_points))
+            # keep a copy of clean data
+            clean_trainset = copy.deepcopy(poisoned_trainset)
+            ########################################################
+
+            if (pdr > 0):
+                poisoned_trainset.data = np.append(poisoned_trainset.data, saved_southwest_dataset_train, axis=0)
+                poisoned_trainset.targets = np.append(poisoned_trainset.targets, sampled_targets_array_train, axis=0)
+            if pdr_2 > 0:
+                poisoned_trainset_2.data = np.append(poisoned_trainset_2.data, saved_southwest_dataset_train_2, axis=0)
+                poisoned_trainset_2.targets = np.append(poisoned_trainset_2.targets, sampled_targets_array_train_2, axis=0)
+
+            logger.info("Shapes of poisoned_trainsets are: {},{}".format(poisoned_trainset.data.shape, poisoned_trainset_2.data.shape))
+            logger.info("Shapes of poisoned_trainsets labels are: {},{}".format(poisoned_trainset.targets.shape, poisoned_trainset_2.targets.shape))
+            logger.info("Distribution of poisoned trainsets' labels are: {}, \n{}".format(sum(poisoned_trainset.targets), sum(poisoned_trainset_2.targets)))
+
+            poisoned_train_loader = torch.utils.data.DataLoader(poisoned_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+            poisoned_train_loader_2 = torch.utils.data.DataLoader(poisoned_trainset_2, batch_size=args.batch_size, shuffle=True, **kwargs)
+            # trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+            clean_train_loader = torch.utils.data.DataLoader(clean_trainset, batch_size=args.batch_size, shuffle=True, **kwargs)
+
+            testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
+
+            poisoned_testset = copy.deepcopy(testset)
+            poisoned_testset_2 = copy.deepcopy(testset)
+            poisoned_testset.data = saved_southwest_dataset_test
+            poisoned_testset.targets = sampled_targets_array_test
+
+            poisoned_testset_2.data = saved_southwest_dataset_test
+            poisoned_testset_2.targets = sampled_targets_array_test_2
+
+            # vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, num_workers=2)
+            # targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, num_workers=2)
+            vanilla_test_loader = torch.utils.data.DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader = torch.utils.data.DataLoader(poisoned_testset, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            targetted_task_test_loader_2 = torch.utils.data.DataLoader(poisoned_testset_2, batch_size=args.test_batch_size, shuffle=False, **kwargs)
+            num_dps_poisoned_dataset = poisoned_trainset.data.shape[0]
+            num_dps_poisoned_dataset_2 = poisoned_trainset_2.data.shape[0]
+
+    return poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, targetted_task_test_loader_2, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader
 
 def seed_experiment(seed=0):
     # seed = 1234

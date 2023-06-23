@@ -9,6 +9,7 @@ from defense import *
 
 from models.vgg import get_vgg_model
 import pandas as pd
+from termcolor import colored
 
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 import datasets
@@ -237,12 +238,13 @@ def train_aba(model, device, train_loader, optimizer, epoch, log_interval, crite
     logger.info('Train Epoch: {} [poisoned samples: ({:d}/{:d})]\tLoss: {:.6f}\tTraining Acc: {:.2f}'.format(
         epoch, poison_data_count, dataset_size, total_l, acc))
 
-def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task", dataset="cifar10", poison_type="fashion"):
+def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task", dataset="cifar10", poison_type="fashion", target_class=None):
     class_correct = list(0. for i in range(10))
     class_total = list(0. for i in range(10))
     
     if dataset in ("mnist", "emnist"):
-        target_class = 7
+        if not target_class:
+            target_class = 7
         if mode == "raw-task":
             classes = [str(i) for i in range(10)]
         elif mode == "targetted-task":
@@ -265,7 +267,7 @@ def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task"
         if poison_type in ("howto", "greencar-neo"):
             target_class = 2
         else:
-            target_class = 9
+            target_class = 9 if not target_class else target_class
 
     model.eval()
     test_loss = 0
@@ -301,6 +303,7 @@ def test(model, device, test_loader, test_batch_size, criterion, mode="raw-task"
                 label = target[image_index]
                 class_correct[label] += c[image_index].item()
                 class_total[label] += 1
+
     test_loss /= len(test_loader.dataset)
 
     if mode == "raw-task":
@@ -422,22 +425,22 @@ def test_aba(model, device, test_loader, test_batch_size, criterion, mode="raw-t
         grid = torchvision.utils.make_grid(batch_img, normalize=True)
         torchvision.utils.save_image(grid, f"track_trigger/pattern_idxs_{pattern_idxs[0]}__checkpoint_trigger_image_epoch.png")
     # print(f"class_total: {class_total}")
-    if dataset in ("mnist", "emnist"):
-        for i in range(10):
-            logger.info('Accuracy of %5s : %.2f %%' % (
-                classes[i], 100 * class_correct[i] / class_total[i]))
-        if poison_type == 'ardis':
-            # ensure 7 is being classified as 1
-            logger.info('Backdoor Accuracy of %.2f : %.2f %%' % (
-                    target_class, 100 * correct_transform))
-            final_acc = 100 * correct_transform
-        else:
-            # trouser acc
-            final_acc = 100 * class_correct[1] / class_total[1]
+    # if dataset in ("mnist", "emnist"):
+    #     for i in range(10):
+    #         logger.info('Accuracy of %5s : %.2f %%' % (
+    #             classes[i], 100 * class_correct[i] / class_total[i]))
+    #     if poison_type == 'ardis':
+    #         # ensure 7 is being classified as 1
+    #         logger.info('Backdoor Accuracy of %.2f : %.2f %%' % (
+    #                 target_class, 100 * correct_transform))
+    #         final_acc = 100 * correct_transform
+    #     else:
+    #         # trouser acc
+    #         final_acc = 100 * class_correct[1] / class_total[1]
     
-    elif dataset == "cifar10":
-        logger.info('#### Targetted Accuracy of %5s : %.2f %%' % (classes[target_class], 100 * class_correct[target_class] / class_total[target_class]))
-        final_acc = 100 * class_correct[target_class] / class_total[target_class]
+    # elif dataset == "cifar10":
+    #     logger.info('#### Targetted Accuracy of %5s : %.2f %%' % (classes[target_class], 100 * class_correct[target_class] / class_total[target_class]))
+    #     final_acc = 100 * class_correct[target_class] / class_total[target_class]
     return correct*100, correct_transform*100
 
 
@@ -462,6 +465,7 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         self.args_lr = arguments['args_lr']
         self.args_gamma = arguments['args_gamma']
         self.attacking_fl_rounds = arguments['attacking_fl_rounds']
+        self.attacking_fl_rounds_2 = arguments['attacking_fl_rounds_2']
         self.poisoned_emnist_train_loader = arguments['poisoned_emnist_train_loader']
         self.poisoned_emnist_train_loader_2 = arguments['poisoned_emnist_train_loader_2']
         self.clean_train_loader = arguments['clean_train_loader']
@@ -492,7 +496,7 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         self.stddev = arguments['stddev']
         self.same_target = arguments['same_target']
         self.ba_strategy = arguments['ba_strategy']
-        self.attacking_fl_rounds_2 = []
+        self.scenario_config = arguments['scenario_config']
 
         logger.info("Posion type! {}".format(self.ba_strategy))
 
@@ -540,22 +544,24 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
         wg_norm_list = []
 
         # Target transformation functions for two parties
-        tgt_trans = get_target_transform(1)
-        tgt_trans_2 = get_target_transform(4)
-        tgt_classes = [1, 4]
-        if self.same_target:
-            tgt_trans_2 = tgt_trans
-            tgt_classes = [1, 1]
-        ptn_idxs_ls = [[0], [1]]
+        tgt_classes = self.scenario_config['target_class']
+        ptn_idxs_ls = self.scenario_config['pattern_list']
+        print(f"self.scenario_config['attack_mode']: {self.scenario_config['attack_mode']}")
+        tgt_trans = get_target_transform(tgt_classes[0], mode=self.scenario_config['attack_mode'][0])
+        tgt_trans_2 = get_target_transform(tgt_classes[1])
+        # tgt_classes = [1, 4]
+        # if self.same_target:
+        #     tgt_trans_2 = tgt_trans
+        #     tgt_classes = [1, 1]
         ma, ba = 0.0, 0.0
         ma_2, ba_2 = 0.0, 0.0
         
-        if not self.same_round:
-            self.attacking_fl_rounds_2 = [i+1 for i in self.attacking_fl_rounds]
-        elif not self.single_attack:
-            self.attacking_fl_rounds_2 = [i for i in self.attacking_fl_rounds]
-        else:
-            self.attacking_fl_rounds_2 = []
+        # if not self.same_round:
+        #     self.attacking_fl_rounds_2 = [i+1 for i in self.attacking_fl_rounds]
+        # elif not self.single_attack:
+        #     self.attacking_fl_rounds_2 = [i for i in self.attacking_fl_rounds]
+        # else:
+        #     self.attacking_fl_rounds_2 = []
         # let's conduct multi-round training
         for flr in range(1, self.fl_round+1):
             # logger.info("##### attack fl rounds: {}".format(self.attacking_fl_rounds))
@@ -645,7 +651,6 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                         # TODO: Party 2 --> add code to customize here
                         tgt_tf = tgt_trans if net_idx == 0 else tgt_trans_2
                         target_class = tgt_classes[net_idx]
-                        tgt_label = 1 if net_idx == 0 else tgt_trans_2
                         ptn_idxs = ptn_idxs_ls[net_idx]
                         local_train_dl = self.poisoned_emnist_train_loader if net_idx == 0 else self.poisoned_emnist_train_loader_2
                         if self.prox_attack:
@@ -655,8 +660,8 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                             wg_hat = wg_clone
                             
                         # TODO: Add a function for testing with pattern-based BA
-                        if self.ba_strategy == "edge-case":
-                            for e in range(1, self.adversarial_local_training_period+1):
+                        if self.scenario_config['ba_strategy'][net_idx] == "edge-case":
+                            for e in range(1, self.local_training_period+1): # TODO: change with the pattern-based
                             # we always assume net index 0 is adversary
                                 if self.defense_technique in ('krum', 'multi-krum'):
                                     train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
@@ -666,10 +671,8 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                                     train(net, self.device, self.poisoned_emnist_train_loader, optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
                                             pgd_attack=self.pgd_attack, eps=self.eps, model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
                                             prox_attack=self.prox_attack, wg_hat=wg_hat)
-                            # TODO: Add a function for testing with pattern-based BA       
-                            test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
-                            test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
-                        elif self.ba_strategy == "dba":
+                        
+                        elif self.scenario_config['ba_strategy'][net_idx] == "dba":
                             for e in range(1, self.adversarial_local_training_period+1):
                                 train_aba(net, self.device, local_train_dl , optimizer, e, log_interval=self.log_interval, criterion=self.criterion,
                                             pgd_attack=self.pgd_attack, eps=self.eps*self.args_gamma**(flr-1), model_original=model_original, project_frequency=self.project_frequency, adv_optimizer=adv_optimizer,
@@ -690,10 +693,20 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                             v = torch.nn.utils.parameters_to_vector(net.parameters())
                             logger.info("Attacker after scaling : Norm = {}".format(torch.norm(v)))
                         # TODO: Add a function for testing with pattern-based BA       
-                        test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
-                        temp_ma, temp_ba = test_aba(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
+                        temp_ma, _ = test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type, target_class=target_class)
+                        
+                        if self.scenario_config['ba_strategy'][net_idx] == "edge-case":
+                            # TODO: Add a function for testing with pattern-based BA       
+                            # temp_ma = test(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
+                            temp_ba, _ = test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, 
+                                           mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type, 
+                                           target_class=target_class)
+                            logger.info(f"\n ==============\n [edge-case]: For client idx {net_idx}, local MA is: {temp_ma} and local BA is: {temp_ba}\n ==============")
+                        elif self.scenario_config['ba_strategy'][net_idx] == "dba":
+                            temp_ma, temp_ba = test_aba(net, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
                                     target_class=target_class, target_transform=tgt_tf, pattern_idxs=ptn_idxs)
-                        logger.info(f"For client idx {net_idx}, local MA is: {temp_ma} and local BA is: {temp_ba}")
+                            logger.info(f"\n ==============\n [dba]: For client idx {net_idx}, local MA is: {temp_ma} and local BA is: {temp_ba}\n ==============")
+                        
                         if net_idx == 0:
                             local_MA, local_BA = temp_ma, temp_ba
                         elif net_idx == 1:
@@ -828,14 +841,30 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
 
             overall_acc, raw_acc = test(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type)
             # backdoor_acc, _ = test(self.net_avg, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type)
-            if flr in self.attacking_fl_rounds:
-                ma, ba = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
-                                     target_class=tgt_classes[0], target_transform=tgt_trans, pattern_idxs=ptn_idxs_ls[0])
-
-            if flr in self.attacking_fl_rounds_2:
-                ma_2, ba_2 = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
-                                     target_class=tgt_classes[1], target_transform=tgt_trans_2, pattern_idxs=ptn_idxs_ls[1])
+            # main_acc = test(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="raw-task", dataset=self.dataset, poison_type=self.poison_type, target_class=target_class)
             
+            if flr in self.attacking_fl_rounds:
+                if self.scenario_config['ba_strategy'][0] == "dba":
+                    _, ba = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", 
+                                     dataset=self.dataset, poison_type=self.poison_type,
+                                     target_class=tgt_classes[0], target_transform=tgt_trans, pattern_idxs=ptn_idxs_ls[0])
+                else:
+                    ba, _ = test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, mode="targetted-task", 
+                                 dataset=self.dataset, poison_type=self.poison_type, 
+                                 target_class=tgt_classes[0])
+                ma = overall_acc
+            
+            if flr in self.attacking_fl_rounds_2:
+                if self.scenario_config['ba_strategy'][1] == "dba":
+                    _, ba_2 = test_aba(self.net_avg, self.device, self.vanilla_emnist_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, 
+                                       mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type,
+                                       target_class=tgt_classes[1], target_transform=tgt_trans_2, pattern_idxs=ptn_idxs_ls[1])
+                else:
+                    ba_2, _ = test(net, self.device, self.targetted_task_test_loader, test_batch_size=self.test_batch_size, criterion=self.criterion, 
+                                mode="targetted-task", dataset=self.dataset, poison_type=self.poison_type, 
+                                target_class=tgt_classes[1])
+                ma_2 = overall_acc
+            logger.info(colored(f"At round {flr}:\nParty 1: MA = {ma}, BA = {ba}\nParty 2: MA = {ma_2}, BA = {ba_2}", "red"))
             fl_iter_list.append(flr)
             main_task_acc.append(overall_acc)
             raw_task_acc.append(raw_acc)
@@ -856,24 +885,24 @@ class FrequencyFederatedLearningTrainer(FederatedLearningTrainer):
                 print(f"start logging to wandb")
                 wandb_ins.log({"General Information": wandb_logging_items})
 
-        df = pd.DataFrame({'fl_iter': fl_iter_list, 
-                            'main_task_acc': main_task_acc, 
-                            'backdoor_acc': backdoor_task_acc, 
-                            'raw_task_acc':raw_task_acc, 
-                            'adv_norm_diff': adv_norm_diff_list, 
-                            'wg_norm': wg_norm_list
-                            })
+        # df = pd.DataFrame({'fl_iter': fl_iter_list, 
+        #                     'main_task_acc': main_task_acc, 
+        #                     'backdoor_acc': backdoor_task_acc, 
+        #                     'raw_task_acc':raw_task_acc, 
+        #                     # 'adv_norm_diff': adv_norm_diff_list, 
+        #                     'wg_norm': wg_norm_list
+        #                     })
        
-        if self.poison_type == 'ardis':
-            # add a row showing initial accuracies
-            df1 = pd.DataFrame({'fl_iter': [0], 'main_task_acc': [88], 'backdoor_acc': [11], 'raw_task_acc': [0], 'adv_norm_diff': [0], 'wg_norm': [0]})
-            df = pd.concat([df1, df])
+        # if self.poison_type == 'ardis':
+        #     # add a row showing initial accuracies
+        #     df1 = pd.DataFrame({'fl_iter': [0], 'main_task_acc': [88], 'backdoor_acc': [11], 'raw_task_acc': [0], 'adv_norm_diff': [0], 'wg_norm': [0]})
+        #     df = pd.concat([df1, df])
 
-        results_filename = get_results_filename(self.poison_type, self.attack_method, self.model_replacement, self.project_frequency,
-                self.defense_technique, self.norm_bound, self.prox_attack, False, self.model)
+        # results_filename = get_results_filename(self.poison_type, self.attack_method, self.model_replacement, self.project_frequency,
+                # self.defense_technique, self.norm_bound, self.prox_attack, False, self.model)
 
-        df.to_csv(results_filename, index=False)
-        logger.info("Wrote accuracy results to: {}".format(results_filename))
+        # df.to_csv(results_filename, index=False)
+        # logger.info("Wrote accuracy results to: {}".format(results_filename))
 
         # save model net_avg
         # torch.save(self.net_avg.state_dict(), "./checkpoint/emnist_lenet_10epoch.pt")

@@ -1,0 +1,53 @@
+---
+scenario_1:
+    ba_strategy: ['dba', 'dba']
+    pdr: [0.0, 0.0]
+    pattern_list: [[0],[1]]
+    attack_mode: ['all2one', 'all2one']
+    target_class: [1,4]
+    attack_rounds: [1,1]
+scenario_2:
+    ba_strategy: ['dba', 'dba']
+    pdr: [0.0, 0.0]
+    pattern_list: [[0],[1]]
+    attack_mode: ['all2one', 'all2one']
+    target_class: [1,1]
+    attack_rounds: [1,1]
+scenario_3:
+    ba_strategy: ['dba', 'dba']
+    pdr: [0.0, 0.0]
+    pattern_list: [[0],[0]]
+    attack_mode: ['all2one', 'all2one']
+    target_class: [1,4]
+    attack_rounds: [1,1]
+scenario_4:
+    ba_strategy: ['dba', 'dba']
+    pdr: [0.0, 0.0]
+    pattern_list: [[0],[1]]
+    target_class: [1,4]
+    attack_mode: ['all2one', 'all2one']
+    attack_rounds: [1,2]
+scenario_5:
+    # for the CIFAR-10
+    ba_strategy: ['edge-case', 'dba']
+    pdr: [0.33, 0.0]
+    pattern_list: [[0],[0]]
+    target_class: [9,1]
+    attack_mode: ['all2one', 'all2one']
+    attack_rounds: [1,1]
+scenario_6:
+    # for the MNIST
+    ba_strategy: ['edge-case', 'dba']
+    pdr: [0.33, 0.0]
+    pattern_list: [[0],[0,1,2,3]]
+    target_class: [1,4]
+    attack_mode: ['all2one', 'all2one']
+    attack_rounds: [1,1]
+scenario_7:
+    # for the CIFAR-10
+    ba_strategy: ['dba', 'dba']
+    pdr: [0.0, 0.0]
+    pattern_list: [[4],[1]]
+    target_class: [1,4]
+    attack_mode: ['all2all', 'all2one']
+    attack_rounds: [1,1]

@@ -18,6 +18,8 @@ from utils import *
 from fl_trainer import *
 from models.vgg import get_vgg_model
 import wandb
+import math
+import yaml
 
 READ_CKPT=True
 
@@ -86,6 +88,8 @@ if __name__ == "__main__":
                         help='random seed utilize in the experiment for reproducibility.')
     parser.add_argument('--attack_freq', type=int, default=10,
                         help='attack freq for fixed-frequency BAs.')
+    parser.add_argument('--scenario_idx', type=int, default=1,
+                        help='scenario index for the experiments.')
     parser.add_argument('--model_replacement', type=bool_string, default=False,
                         help='to scale or not to scale')
     parser.add_argument('--project_frequency', type=int, default=10,
@@ -117,6 +121,13 @@ if __name__ == "__main__":
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
 
     device = torch.device(args.device if use_cuda else "cpu")    
+
+    with open('experiment_config.yaml', 'r') as file:
+        data = yaml.safe_load(file)
+        scenario_config = data[f'scenario_{args.scenario_idx}']
+    print(scenario_config)
+
+
     """
     # hack to make stuff work on GD's machines
     if torch.cuda.device_count() > 2:
@@ -162,7 +173,8 @@ if __name__ == "__main__":
     adversarial_local_training_period = 5
 
     # load poisoned dataset:
-    poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader = load_poisoned_datasets(args=args)
+    poisoned_train_loader, poisoned_train_loader_2, vanilla_test_loader, targetted_task_test_loader, targetted_task_test_loader_2, num_dps_poisoned_dataset, num_dps_poisoned_dataset_2, clean_train_loader = load_poisoned_datasets(args=args, scenario_config=scenario_config)
+    attack_rounds_mod = scenario_config['attack_rounds']
     # READ_CKPT = False
     if READ_CKPT:
         if args.model == "lenet":
@@ -191,7 +203,9 @@ if __name__ == "__main__":
 
     # let's remain a copy of the global model for measuring the norm distance:
     vanilla_model = copy.deepcopy(net_avg)
-
+    attacking_fl_rounds_2 = [i for i in range(1, args.fl_round + 1) if (max(i-attack_rounds_mod[1],0))% args.attack_freq == 0]
+    if args.single_attack:
+        attacking_fl_rounds_2 = []
     if args.fl_mode == "fixed-freq":
         arguments = {
             #"poisoned_emnist_dataset":poisoned_emnist_dataset,
@@ -211,9 +225,11 @@ if __name__ == "__main__":
             "scale_factor":args.scale_factor,
             "same_target":args.same_target,
             "same_round":args.same_round,
-            "attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-1)% args.attack_freq == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
+            "attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-attack_rounds_mod[0])% args.attack_freq == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
+            "attacking_fl_rounds_2":attacking_fl_rounds_2,
             #"attacking_fl_rounds":[i for i in range(1, args.fl_round + 1) if (i-1)%100 == 0], #"attacking_fl_rounds":[i for i in range(1, fl_round + 1)], #"attacking_fl_rounds":[1],
             "num_dps_poisoned_dataset":num_dps_poisoned_dataset,
+            "scenario_config":scenario_config,
             "poisoned_emnist_train_loader":poisoned_train_loader,
             "num_dps_poisoned_dataset_2":num_dps_poisoned_dataset_2,
             "poisoned_emnist_train_loader_2":poisoned_train_loader_2,
